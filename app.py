@@ -4,1038 +4,1829 @@ import hashlib
 import secrets
 import hmac
 import os
-import time
+import re
+import json
+import io
+from pathlib import Path
 from datetime import datetime
 
-# ==================================================
-# إعدادات NUMBER ONE
-# ==================================================
+from PIL import Image, ImageOps
+
+# =========================================================
+# NUMBER ONE — ADVERTISING & CREATIVE STUDIO
+# =========================================================
 
 st.set_page_config(
-    page_title="NUMBER ONE",
-    page_icon="🚀",
+    page_title="NUMBER ONE | استوديو الإبداع",
+    page_icon="👑",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-DB_PATH = "number_one.db"
+APP_NAME = "NUMBER ONE"
+DB_PATH = os.getenv("NUMBER_ONE_DB", "number_one.db")
+UPLOAD_DIR = Path("user_uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
 
-# ==================================================
-# تنسيق الواجهة
-# ==================================================
+# احتفظ بإعداد كلمة مرور المالك الحالية في Secrets.
+# لا تضع كلمة المرور داخل ملف الكود.
+OWNER_USERNAME = os.getenv("NUMBER_ONE_OWNER_USERNAME", "owner")
+OWNER_PASSWORD = os.getenv("NUMBER_ONE_OWNER_PASSWORD", "")
 
-st.markdown("""
-<style>
-.stApp {
-    background: linear-gradient(135deg, #08111f, #101d35);
-    color: #ffffff;
-}
-[data-testid="stSidebar"] {
-    background: #0b1426;
-}
-h1, h2, h3 {
-    color: #65e6ff !important;
-}
-.stButton > button {
-    width: 100%;
-    border-radius: 12px;
-    border: 1px solid #65e6ff;
-    background: #12304b;
-    color: white;
-    font-weight: bold;
-    padding: 10px;
-}
-.stButton > button:hover {
-    background: #176087;
-    color: white;
-}
-div[data-testid="stMetric"] {
-    background: #12233a;
-    padding: 15px;
-    border-radius: 12px;
-}
-</style>
-""", unsafe_allow_html=True)
+try:
+    OWNER_USERNAME = str(
+        st.secrets.get("NUMBER_ONE_OWNER_USERNAME", OWNER_USERNAME)
+    )
+    OWNER_PASSWORD = str(
+        st.secrets.get("NUMBER_ONE_OWNER_PASSWORD", OWNER_PASSWORD)
+    )
+except Exception:
+    pass
 
-# ==================================================
-# قاعدة البيانات
-# ==================================================
 
-def get_db():
-    return sqlite3.connect(DB_PATH, timeout=15)
+# =========================================================
+# DATABASE
+# =========================================================
+
+def connect_db():
+    con = sqlite3.connect(DB_PATH, timeout=30)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA foreign_keys=ON")
+    return con
+
+
+def now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def init_db():
-    with get_db() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                salt TEXT NOT NULL,
-                role TEXT DEFAULT 'user',
-                plan TEXT DEFAULT 'free',
-                created_at TEXT NOT NULL
-            )
-        """)
+    con = connect_db()
+    cur = con.cursor()
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS projects (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL,
-                title TEXT NOT NULL,
-                category TEXT NOT NULL,
-                description TEXT,
-                created_at TEXT NOT NULL
-            )
-        """)
+    # الحفاظ على جدول المستخدمين الموجود في النسخة السابقة.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            plan TEXT DEFAULT 'Free',
+            created TEXT NOT NULL
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            method TEXT NOT NULL,
+            amount TEXT NOT NULL,
+            reference TEXT NOT NULL,
+            status TEXT DEFAULT 'قيد المراجعة',
+            created TEXT NOT NULL
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            category TEXT NOT NULL,
+            details TEXT NOT NULL,
+            contact TEXT NOT NULL,
+            created TEXT NOT NULL
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            username TEXT PRIMARY KEY,
+            email TEXT DEFAULT '',
+            role TEXT DEFAULT 'user',
+            status TEXT DEFAULT 'active'
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            title TEXT NOT NULL,
+            category TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created TEXT NOT NULL,
+            updated TEXT NOT NULL
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS merchant_ads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            placement TEXT NOT NULL,
+            duration INTEGER NOT NULL,
+            price TEXT DEFAULT 'يحدد من الإدارة',
+            status TEXT DEFAULT 'بانتظار المراجعة',
+            created TEXT NOT NULL
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ad_spaces (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            price TEXT DEFAULT 'يحدد من الإدارة',
+            active INTEGER DEFAULT 1
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS social_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            profile_url TEXT DEFAULT '',
+            status TEXT DEFAULT 'قريبًا',
+            created TEXT NOT NULL
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor TEXT NOT NULL,
+            action TEXT NOT NULL,
+            details TEXT DEFAULT '',
+            created TEXT NOT NULL
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+
+    cur.execute("SELECT COUNT(*) FROM ad_spaces")
+    if cur.fetchone()[0] == 0:
+        cur.executemany("""
+            INSERT INTO ad_spaces
+            (title, description, price, active)
+            VALUES (?, ?, ?, 1)
+        """, [
+            ("الصفحة الرئيسية", "مساحة إعلانية في الواجهة الرئيسية",
+             "يحدد من الإدارة"),
+            ("معرض القوالب", "مساحة إعلانية داخل معرض القوالب",
+             "يحدد من الإدارة"),
+            ("مساحة التجار", "مساحة مخصصة للعروض التجارية",
+             "يحدد من الإدارة")
+        ])
+
+    con.commit()
+    con.close()
 
 
 init_db()
 
-# ==================================================
-# حماية كلمات المرور
-# ==================================================
 
-def hash_password(password, salt):
+# =========================================================
+# SECURITY AND ACCOUNTS
+# =========================================================
+
+def password_hash(password):
+    salt = os.getenv(
+        "NUMBER_ONE_PASSWORD_SALT",
+        "change-this-salt-before-production"
+    )
+
+    try:
+        salt = str(
+            st.secrets.get("NUMBER_ONE_PASSWORD_SALT", salt)
+        )
+    except Exception:
+        pass
+
     return hashlib.pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
         salt.encode("utf-8"),
-        300000
+        200000
     ).hex()
 
 
-def valid_password(password):
-    return len(password) >= 10
+def log_action(actor, action, details=""):
+    con = connect_db()
+    con.execute("""
+        INSERT INTO audit_log(actor, action, details, created)
+        VALUES (?, ?, ?, ?)
+    """, (actor or "anonymous", action, str(details)[:500], now()))
+    con.commit()
+    con.close()
 
 
-def create_user(username, password, role="user"):
-    username = username.strip()
-
-    if len(username) < 3 or len(username) > 30:
-        return False, "اسم المستخدم يجب أن يكون بين 3 و30 حرفًا."
-
-    if not username.replace("_", "").replace("-", "").isalnum():
-        return False, "استخدم الحروف والأرقام والشرطة فقط في اسم المستخدم."
-
-    if not valid_password(password):
-        return False, "كلمة المرور يجب أن تحتوي على 10 أحرف أو أكثر."
-
-    salt = secrets.token_hex(16)
-    password_hash = hash_password(password, salt)
-
-    try:
-        with get_db() as conn:
-            conn.execute("""
-                INSERT INTO users
-                (username, password_hash, salt, role, plan, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                username,
-                password_hash,
-                salt,
-                role,
-                "free",
-                datetime.now().isoformat(timespec="seconds")
-            ))
-
-        return True, "تم إنشاء الحساب بنجاح."
-
-    except sqlite3.IntegrityError:
-        return False, "اسم المستخدم مستخدم بالفعل."
-
-    except sqlite3.Error:
-        return False, "تعذر إنشاء الحساب. حاول مرة أخرى."
-
-
-def verify_user(username, password):
-    with get_db() as conn:
-        row = conn.execute("""
-            SELECT username, password_hash, salt, role, plan
-            FROM users
-            WHERE username = ?
-        """, (username.strip(),)).fetchone()
-
-    if not row:
-        return None
-
-    username_db, saved_hash, salt, role, plan = row
-    submitted_hash = hash_password(password, salt)
-
-    if hmac.compare_digest(saved_hash, submitted_hash):
-        return {
-            "username": username_db,
-            "role": role,
-            "plan": plan
-        }
-
-    return None
-
-
-def get_user(username):
-    with get_db() as conn:
-        row = conn.execute("""
-            SELECT username, role, plan, created_at
-            FROM users
-            WHERE username = ?
-        """, (username,)).fetchone()
-
-    if not row:
-        return None
-
-    return {
-        "username": row[0],
-        "role": row[1],
-        "plan": row[2],
-        "created_at": row[3]
+def get_profile(username):
+    con = connect_db()
+    row = con.execute("""
+        SELECT * FROM user_profiles WHERE username=?
+    """, (username,)).fetchone()
+    con.close()
+    return dict(row) if row else {
+        "username": username,
+        "email": "",
+        "role": "user",
+        "status": "active"
     }
 
 
-def change_password(username, old_password, new_password):
-    user = verify_user(username, old_password)
+def register_user(username, password, email=""):
+    username = username.strip()
+    email = email.strip().lower()
+
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
+        return False, "اسم المستخدم يجب أن يكون من 3 إلى 32 حرفًا."
+
+    if len(password) < 10:
+        return False, "كلمة المرور يجب أن تكون 10 أحرف على الأقل."
+
+    if email and not re.fullmatch(
+        r"[^@\s]+@[^@\s]+\.[^@\s]+", email
+    ):
+        return False, "البريد الإلكتروني غير صحيح."
+
+    con = connect_db()
+
+    try:
+        con.execute("""
+            INSERT INTO users(username, password, plan, created)
+            VALUES (?, ?, 'Free', ?)
+        """, (username, password_hash(password), now()))
+
+        con.execute("""
+            INSERT INTO user_profiles(username, email, role, status)
+            VALUES (?, ?, 'user', 'active')
+        """, (username, email))
+
+        con.commit()
+        log_action(username, "register")
+        return True, "تم إنشاء الحساب بنجاح."
+
+    except sqlite3.IntegrityError:
+        con.rollback()
+        return False, "اسم المستخدم مستخدم بالفعل."
+
+    finally:
+        con.close()
+
+
+def authenticate(username, password):
+    con = connect_db()
+
+    user = con.execute("""
+        SELECT username, password, plan
+        FROM users WHERE username=?
+    """, (username.strip(),)).fetchone()
+
+    con.close()
 
     if not user:
-        return False, "كلمة المرور الحالية غير صحيحة."
+        return None
 
-    if not valid_password(new_password):
-        return False, "كلمة المرور الجديدة يجب أن تكون 10 أحرف أو أكثر."
+    profile = get_profile(user["username"])
 
-    salt = secrets.token_hex(16)
-    password_hash = hash_password(new_password, salt)
+    if profile["status"] != "active":
+        return None
 
-    with get_db() as conn:
-        conn.execute("""
-            UPDATE users
-            SET password_hash = ?, salt = ?
-            WHERE username = ?
-        """, (password_hash, salt, username))
+    expected = password_hash(password)
 
-    return True, "تم تغيير كلمة المرور بنجاح."
+    # يدعم التجزئة القديمة المتوافقة مع الإصدار السابق.
+    if not hmac.compare_digest(str(user["password"]), expected):
+        return None
 
-
-# ==================================================
-# إنشاء حساب المدير من Secrets
-# ==================================================
-
-def bootstrap_admin():
-    try:
-        admin_username = st.secrets.get("ADMIN_USERNAME", "")
-        admin_password = st.secrets.get("ADMIN_PASSWORD", "")
-    except Exception:
-        admin_username = ""
-        admin_password = ""
-
-    if not admin_username or not admin_password:
-        return
-
-    with get_db() as conn:
-        existing = conn.execute(
-            "SELECT id FROM users WHERE username = ?",
-            (admin_username,)
-        ).fetchone()
-
-    if not existing:
-        create_user(admin_username, admin_password, role="admin")
+    return {
+        "username": user["username"],
+        "plan": user["plan"],
+        "role": profile["role"]
+    }
 
 
-bootstrap_admin()
-
-# ==================================================
-# حالة تسجيل الدخول
-# ==================================================
-
-if "user" not in st.session_state:
-    st.session_state.user = None
-
-if "login_attempts" not in st.session_state:
-    st.session_state.login_attempts = 0
-
-if "login_wait_until" not in st.session_state:
-    st.session_state.login_wait_until = 0
+def current_user():
+    return st.session_state.get("user")
 
 
-def logout():
-    st.session_state.user = None
-    st.session_state.login_attempts = 0
-    st.session_state.login_wait_until = 0
-    st.rerun()
+def is_owner():
+    user = current_user()
+    return bool(user and user["role"] == "owner")
 
 
-# ==================================================
-# الشريط الجانبي
-# ==================================================
-
-with st.sidebar:
-    st.markdown("# 🚀 NUMBER ONE")
-    st.caption("منصتك الإبداعية")
-
-    st.divider()
-
-    if st.session_state.user:
-        current_user = st.session_state.user
-
-        st.success("مرحبًا، " + current_user["username"])
-        st.caption(
-            "نوع الحساب: "
-            + ("مدير" if current_user["role"] == "admin" else "مستخدم")
-        )
-
-        page_options = [
-            "الرئيسية",
-            "تصفح القوالب",
-            "تصميم الشعارات",
-            "تصميم الإعلانات",
-            "مساحة التجار",
-            "مشاريعي",
-            "الاشتراكات",
-            "إعدادات الحساب"
-        ]
-
-        if current_user["role"] == "admin":
-            page_options.append("لوحة الإدارة")
-
-        page = st.radio("القائمة الرئيسية", page_options)
-
-        st.divider()
-
-        if st.button("🚪 تسجيل الخروج"):
-            logout()
-
-    else:
-        page = "تسجيل الدخول"
-
-        st.info("سجل دخولك للوصول إلى مساحة العمل.")
-        st.caption("NUMBER ONE © 2026")
+def is_merchant():
+    user = current_user()
+    return bool(user and user["role"] in ("merchant", "owner"))
 
 
-# ==================================================
-# صفحة تسجيل الدخول والتسجيل
-# ==================================================
+def require_login():
+    if not current_user():
+        st.warning("سجل الدخول أولًا لاستخدام هذه الميزة.")
+        return False
+    return True
 
-if not st.session_state.user:
 
-    st.markdown("# 🚀 مرحبًا بك في NUMBER ONE")
-    st.write("منصة واحدة للقوالب والتصميم والإعلانات.")
+# =========================================================
+# OWNER ACCESS
+# =========================================================
 
-    login_tab, register_tab = st.tabs([
-        "🔐 تسجيل الدخول",
-        "👤 إنشاء حساب"
-    ])
+# لا يتم إنشاء حساب مالك تلقائي بكلمة مرور افتراضية.
+# يجب استخدام بيانات المالك الموجودة لديك أو ضبطها بأمان.
 
-    with login_tab:
-        st.subheader("تسجيل الدخول")
+def owner_login(username, password):
+    if not OWNER_PASSWORD:
+        return False
 
-        if time.time() < st.session_state.login_wait_until:
-            remaining = int(
-                st.session_state.login_wait_until - time.time()
-            )
-            st.error(
-                f"توقف مؤقت بسبب المحاولات الفاشلة. انتظر {remaining} ثانية."
-            )
-
-        with st.form("login_form"):
-            login_username = st.text_input("اسم المستخدم")
-            login_password = st.text_input(
-                "كلمة المرور",
-                type="password"
-            )
-
-            login_submit = st.form_submit_button("دخول إلى حسابي")
-
-        if login_submit:
-            if time.time() < st.session_state.login_wait_until:
-                st.error("انتظر قليلًا قبل المحاولة مرة أخرى.")
-
-            elif not login_username.strip() or not login_password:
-                st.warning("أدخل اسم المستخدم وكلمة المرور.")
-
-            else:
-                user = verify_user(login_username, login_password)
-
-                if user:
-                    st.session_state.user = user
-                    st.session_state.login_attempts = 0
-                    st.rerun()
-
-                else:
-                    st.session_state.login_attempts += 1
-                    st.error("اسم المستخدم أو كلمة المرور غير صحيحة.")
-
-                    if st.session_state.login_attempts >= 5:
-                        st.session_state.login_wait_until = (
-                            time.time() + 60
-                        )
-                        st.session_state.login_attempts = 0
-                        st.warning(
-                            "تم إيقاف محاولات الدخول في هذه الجلسة لمدة دقيقة."
-                        )
-
-    with register_tab:
-        st.subheader("إنشاء حساب مجاني")
-
-        with st.form("register_form"):
-            new_username = st.text_input(
-                "اختر اسم مستخدم",
-                key="register_username"
-            )
-
-            new_password = st.text_input(
-                "اختر كلمة مرور",
-                type="password",
-                key="register_password"
-            )
-
-            confirm_password = st.text_input(
-                "أكد كلمة المرور",
-                type="password",
-                key="register_confirm"
-            )
-
-            register_submit = st.form_submit_button("إنشاء الحساب")
-
-        if register_submit:
-            if new_password != confirm_password:
-                st.error("كلمتا المرور غير متطابقتين.")
-
-            else:
-                success, message = create_user(
-                    new_username,
-                    new_password
-                )
-
-                if success:
-                    st.success(message + " يمكنك الآن تسجيل الدخول.")
-                else:
-                    st.error(message)
-
-    st.info(
-        "حساب المدير يُنشأ من إعدادات Secrets في Streamlit Cloud، "
-        "وليس من صفحة التسجيل العامة."
+    return (
+        hmac.compare_digest(username, OWNER_USERNAME)
+        and hmac.compare_digest(password, OWNER_PASSWORD)
     )
 
-    st.stop()
+
+# =========================================================
+# DESIGN SYSTEM
+# =========================================================
+
+st.markdown("""
+<style>
+@import url(
+'https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap'
+);
+
+html, body, [class*="css"] {
+    font-family: 'Cairo', sans-serif;
+}
+
+.stApp {
+    background:
+        radial-gradient(circle at top right, #1b3157, transparent 38%),
+        linear-gradient(135deg, #070b16, #111a2e);
+    color: #f5f7ff;
+}
+
+section[data-testid="stSidebar"] {
+    background: #0a1120;
+    border-left: 1px solid #344563;
+}
+
+.hero {
+    background: linear-gradient(135deg, #192a49, #0b1221);
+    border: 1px solid #d7b45d;
+    border-radius: 22px;
+    padding: 25px;
+    text-align: center;
+    margin-bottom: 22px;
+}
+
+.hero h1 {
+    color: #f0cc70;
+    font-size: clamp(28px, 4vw, 44px);
+    font-weight: 800;
+}
+
+.hero p {
+    color: #d7dfef;
+}
+
+.panel {
+    background: linear-gradient(145deg, #19243a, #0d1526);
+    border: 1px solid #344663;
+    border-radius: 16px;
+    padding: 18px;
+    margin-bottom: 14px;
+}
+
+.gold {
+    color: #f0cc70;
+}
+
+div.stButton > button,
+div.stDownloadButton > button {
+    border-radius: 10px;
+    min-height: 42px;
+    font-weight: 700;
+}
+
+.stTextInput input,
+.stTextArea textarea {
+    background: #111c30;
+    color: white;
+    border: 1px solid #344663;
+}
+
+@media (max-width: 768px) {
+    .hero { padding: 15px; }
+}
+</style>
+""", unsafe_allow_html=True)
 
 
-# ==================================================
-# الصفحات الداخلية
-# ==================================================
+st.markdown("""
+<div class="hero">
+    <h1>👑 NUMBER ONE</h1>
+    <p>استوديو الإعلانات والتصميم الإبداعي</p>
+    <p>أنشئ محتواك ونظّم مشاريعك من مكان واحد</p>
+</div>
+""", unsafe_allow_html=True)
 
-user = st.session_state.user
 
-st.markdown(
-    f"## 👋 أهلًا بك في NUMBER ONE، {user['username']}"
+# =========================================================
+# NAVIGATION
+# =========================================================
+
+PAGES = [
+    "🏠 الرئيسية",
+    "🎨 قوالب الإعلانات",
+    "✍️ صانع الإعلان",
+    "🗂️ مشاريعي",
+    "🎬 الصور والفيديو",
+    "🌐 حسابات التواصل",
+    "🏪 مساحة التجار",
+    "💎 الاشتراكات",
+    "💳 الدفع",
+    "📋 طلب تصميم",
+    "👤 حسابي",
+    "🔐 تسجيل الدخول",
+    "📝 إنشاء حساب",
+    "🔑 استعادة الحساب",
+    "⚙️ الإعدادات",
+    "📜 الخصوصية والشروط",
+    "📞 التواصل",
+    "🛡️ لوحة المالك"
+]
+
+st.sidebar.markdown(
+    "<h2 style='color:#f0cc70;text-align:center'>👑 NUMBER ONE</h2>",
+    unsafe_allow_html=True
 )
 
-# ==================================================
-# الرئيسية
-# ==================================================
+if current_user():
+    st.sidebar.success(
+        f"{current_user()['username']} · {current_user()['plan']}"
+    )
 
-if page == "الرئيسية":
+    if st.sidebar.button("تسجيل الخروج", use_container_width=True):
+        log_action(current_user()["username"], "logout")
+        st.session_state.pop("user", None)
+        st.rerun()
+else:
+    st.sidebar.info("يمكنك تصفح الموقع دون حساب.")
 
-    st.markdown("# 🚀 اصنع أفكارك مع NUMBER ONE")
+page = st.sidebar.radio("القائمة الرئيسية", PAGES)
+
+st.sidebar.caption("واجهة متجاوبة • العربية أولًا • الكمبيوتر والهاتف")
+
+
+# =========================================================
+# AD TEMPLATES
+# =========================================================
+
+TEMPLATES = [
+    {
+        "name": "إعلان متجر إلكتروني",
+        "category": "التجارة",
+        "description": "إعلان منتجات وعروض وخصومات."
+    },
+    {
+        "name": "إعلان مطعم",
+        "category": "المطاعم",
+        "description": "إعلان وجبات وعروض المطاعم."
+    },
+    {
+        "name": "إعلان عقاري",
+        "category": "العقارات",
+        "description": "تسويق الأراضي والشقق والعقارات."
+    },
+    {
+        "name": "إعلان دورة تدريبية",
+        "category": "التعليم",
+        "description": "إعلان الدورات والمعاهد."
+    },
+    {
+        "name": "إعلان منتج تجميلي",
+        "category": "الجمال",
+        "description": "تصميم تسويقي للمنتجات التجميلية."
+    },
+    {
+        "name": "إعلان تخفيضات",
+        "category": "التجارة",
+        "description": "إبراز العروض ومدة التخفيض."
+    },
+    {
+        "name": "إعلان خدمة",
+        "category": "الخدمات",
+        "description": "التعريف بالخدمات المهنية."
+    },
+    {
+        "name": "إعلان علامة تجارية",
+        "category": "العلامات التجارية",
+        "description": "تعريف الجمهور بالعلامة."
+    }
+]
+
+
+# =========================================================
+# HOME
+# =========================================================
+
+if page == "🏠 الرئيسية":
+
+    st.subheader("مرحبًا بك في NUMBER ONE")
+
     st.write(
-        "مساحة عمل تجمع القوالب وأفكار الشعارات والإعلانات "
-        "ومشاريعك التجارية في مكان واحد."
+        "منصة لإنشاء الأفكار الإعلانية وتنظيم المشاريع "
+        "وتجهيز الصور ومتابعة الطلبات التجارية."
     )
 
-    col1, col2, col3 = st.columns(3)
+    cols = st.columns(4)
 
-    with col1:
-        st.metric("القوالب", "متاحة للتصفح")
-
-    with col2:
-        st.metric("الحساب", "مجاني" if user["plan"] == "free" else "Pro")
-
-    with col3:
-        st.metric("مساحة العمل", "جاهزة")
-
-    st.divider()
-
-    st.subheader("ماذا تريد أن تصمم اليوم؟")
-
-    a, b = st.columns(2)
-
-    with a:
-        st.info("🎨 الشعارات\n\nخطط لشعار علامتك التجارية.")
-
-        if st.button("الانتقال إلى تصميم الشعارات"):
-            st.session_state.home_target = "تصميم الشعارات"
-            st.rerun()
-
-    with b:
-        st.info("📢 الإعلانات\n\nاكتب فكرة إعلانك واحفظها ضمن مشاريعك.")
-
-        if st.button("الانتقال إلى تصميم الإعلانات"):
-            st.session_state.home_target = "تصميم الإعلانات"
-            st.rerun()
-
-    if "home_target" in st.session_state:
-        st.info(
-            "اختر الصفحة المطلوبة من القائمة الجانبية: "
-            + st.session_state.home_target
-        )
-
-    st.warning(
-        "توليد الصور والفيديو بالذكاء الاصطناعي يحتاج إلى ربط خدمة خارجية؛ "
-        "هذه النسخة لا تدّعي توليد ملفات صور أو فيديو فعلية."
-    )
-
-
-# ==================================================
-# تصفح القوالب
-# ==================================================
-
-elif page == "تصفح القوالب":
-
-    st.title("🧩 معرض القوالب")
-
-    st.write(
-        "تصفح أفكارًا أولية يمكنك تطويرها. هذه أمثلة وصفية وليست "
-        "ملفات قوالب قابلة للتنزيل بعد."
-    )
-
-    category = st.selectbox(
-        "اختر نوع القوالب",
-        [
-            "الكل",
-            "مطاعم ومأكولات",
-            "عقارات",
-            "متاجر",
-            "ملابس وأزياء",
-            "تقنية",
-            "تعليم"
-        ]
-    )
-
-    templates = [
-        {
-            "name": "إعلان وجبة شهية",
-            "category": "مطاعم ومأكولات",
-            "description": "تصميم إعلاني للطعام مع عنوان واضح وسعر وعرض."
-        },
-        {
-            "name": "عقار للبيع",
-            "category": "عقارات",
-            "description": "تصميم لعرض العقارات والمزايا ووسيلة التواصل."
-        },
-        {
-            "name": "عرض متجر",
-            "category": "متاجر",
-            "description": "إعلان خصومات ومنتجات جديده."
-        },
-        {
-            "name": "مجموعة أزياء",
-            "category": "ملابس وأزياء",
-            "description": "فكرة تصميم أنيقة لعرض الملابس."
-        },
-        {
-            "name": "خدمة تقنية",
-            "category": "تقنية",
-            "description": "إعلان لخدمة رقمية أو تطبيق."
-        },
-        {
-            "name": "دورة تعليمية",
-            "category": "تعليم",
-            "description": "إعلان لدورة أو برنامج تدريبي."
-        }
+    cards = [
+        ("🎨 القوالب", "قوالب لمجالات متعددة"),
+        ("✍️ صانع الإعلان", "إنشاء نصوص إعلانية"),
+        ("🗂️ مشاريعي", "حفظ الأعمال وتنزيلها"),
+        ("🎬 الصور والفيديو", "تجهيز مقاسات الصور")
     ]
 
-    for item in templates:
-        if category != "الكل" and item["category"] != category:
+    for col, item in zip(cols, cards):
+        with col:
+            st.markdown(
+                f'<div class="panel"><h3 class="gold">{item[0]}</h3>'
+                f'<p>{item[1]}</p></div>',
+                unsafe_allow_html=True
+            )
+
+    st.markdown("### الميزات قيد التطوير")
+
+    st.info(
+        "قريبًا: توليد الصور والشعارات بالذكاء الاصطناعي، "
+        "وتحرير الفيديو، والربط المباشر بحسابات التواصل الاجتماعي."
+    )
+
+    st.caption(
+        "لن تظهر هذه الخدمات على أنها مفعلة قبل ربطها واختبارها."
+    )
+
+
+# =========================================================
+# TEMPLATES
+# =========================================================
+
+elif page == "🎨 قوالب الإعلانات":
+
+    st.subheader("مكتبة القوالب الإعلانية")
+
+    category = st.selectbox(
+        "اختر المجال",
+        ["الكل"] + sorted(set(t["category"] for t in TEMPLATES))
+    )
+
+    for i, template in enumerate(TEMPLATES):
+
+        if category != "الكل" and template["category"] != category:
             continue
 
         with st.container(border=True):
-            st.subheader(item["name"])
-            st.caption(item["category"])
-            st.write(item["description"])
+
+            st.markdown(f"### {template['name']}")
+            st.caption(template["category"])
+            st.write(template["description"])
 
             if st.button(
-                "استخدام الفكرة",
-                key="template_" + item["name"]
+                "استخدام القالب",
+                key=f"template_{i}",
+                type="primary"
             ):
-                st.session_state.selected_template = item
-                st.session_state.template_notice = (
-                    "تم اختيار القالب: " + item["name"]
+                st.session_state["selected_template"] = template
+                st.success(
+                    "تم اختيار القالب. انتقل إلى صانع الإعلان."
                 )
 
-    if "template_notice" in st.session_state:
-        st.success(st.session_state.template_notice)
 
-    if "selected_template" in st.session_state:
-        chosen = st.session_state.selected_template
+# =========================================================
+# AD CREATOR
+# =========================================================
 
-        st.divider()
-        st.subheader("حفظ الفكرة ضمن مشاريعك")
+elif page == "✍️ صانع الإعلان":
 
-        with st.form("save_template_form"):
-            project_title = st.text_input(
-                "اسم المشروع",
-                value=chosen["name"]
-            )
+    st.subheader("صانع الإعلان")
 
-            project_description = st.text_area(
-                "تفاصيل المشروع",
-                value=chosen["description"]
-            )
+    with st.form("ad_creator_form"):
 
-            save_template = st.form_submit_button("حفظ المشروع")
+        brand = st.text_input("اسم العلامة التجارية")
+        product = st.text_input("المنتج أو الخدمة")
+        audience = st.text_input("الجمهور المستهدف")
+        offer = st.text_area("العرض أو الرسالة الرئيسية")
 
-        if save_template:
-            with get_db() as conn:
-                conn.execute("""
+        tone = st.selectbox(
+            "أسلوب الإعلان",
+            ["احترافي", "فاخر", "حيوي", "ودود", "رسمي", "مختصر"]
+        )
+
+        platform = st.selectbox(
+            "المنصة",
+            [
+                "Instagram",
+                "Facebook",
+                "TikTok",
+                "YouTube",
+                "X",
+                "LinkedIn",
+                "موقع إلكتروني"
+            ]
+        )
+
+        submitted = st.form_submit_button(
+            "إنشاء النص الإعلاني",
+            type="primary"
+        )
+
+    if submitted:
+
+        if not product.strip():
+            st.error("اكتب اسم المنتج أو الخدمة.")
+        else:
+
+            ad = f"""
+{brand or 'اسم العلامة التجارية'}
+
+{product}
+
+{offer or 'اكتشف المنتج وتعرّف على تفاصيله.'}
+
+الجمهور المستهدف: {audience or 'العملاء المهتمون'}
+أسلوب الإعلان: {tone}
+المنصة: {platform}
+
+تواصل معنا لمعرفة التفاصيل.
+            """.strip()
+
+            st.session_state["last_ad"] = ad
+            st.session_state["last_ad_title"] = product
+
+    if st.session_state.get("last_ad"):
+
+        edited = st.text_area(
+            "راجع النص وعدّله قبل استخدامه",
+            value=st.session_state["last_ad"],
+            height=230
+        )
+
+        st.download_button(
+            "تنزيل النص",
+            data=edited.encode("utf-8"),
+            file_name="number_one_ad.txt",
+            mime="text/plain"
+        )
+
+        if st.button("حفظ في مشاريعي", type="primary"):
+
+            if require_login():
+
+                con = connect_db()
+
+                con.execute("""
                     INSERT INTO projects
-                    (username, title, category, description, created_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    (username,title,category,content,created,updated)
+                    VALUES (?,?,'إعلان',?,?,?)
                 """, (
-                    user["username"],
-                    project_title.strip() or chosen["name"],
-                    chosen["category"],
-                    project_description,
-                    datetime.now().isoformat(timespec="seconds")
+                    current_user()["username"],
+                    st.session_state.get("last_ad_title", "إعلان جديد"),
+                    edited,
+                    now(),
+                    now()
                 ))
 
-            st.success("تم حفظ المشروع.")
+                con.commit()
+                con.close()
+
+                log_action(
+                    current_user()["username"],
+                    "project_saved"
+                )
+
+                st.success("تم حفظ المشروع.")
 
 
-# ==================================================
-# تصميم الشعارات
-# ==================================================
+# =========================================================
+# PROJECTS
+# =========================================================
 
-elif page == "تصميم الشعارات":
+elif page == "🗂️ مشاريعي":
 
-    st.title("🎨 مساحة تصميم الشعارات")
+    st.subheader("مشاريعي")
 
-    st.write(
-        "اكتب تفاصيل الشعار الذي تريد إنشاءه، ثم احفظ وصفه "
-        "حتى يكون جاهزًا للاستخدام عند ربط خدمة توليد الصور."
+    if require_login():
+
+        con = connect_db()
+
+        projects = con.execute("""
+            SELECT * FROM projects
+            WHERE username=?
+            ORDER BY updated DESC
+        """, (current_user()["username"],)).fetchall()
+
+        con.close()
+
+        if not projects:
+            st.info("لا توجد مشاريع محفوظة.")
+        else:
+
+            for project in projects:
+
+                with st.expander(project["title"]):
+
+                    edited = st.text_area(
+                        "المحتوى",
+                        project["content"],
+                        key=f"edit_{project['id']}"
+                    )
+
+                    c1, c2 = st.columns(2)
+
+                    with c1:
+
+                        if st.button(
+                            "حفظ التعديل",
+                            key=f"save_{project['id']}"
+                        ):
+
+                            con = connect_db()
+
+                            con.execute("""
+                                UPDATE projects
+                                SET content=?, updated=?
+                                WHERE id=? AND username=?
+                            """, (
+                                edited,
+                                now(),
+                                project["id"],
+                                current_user()["username"]
+                            ))
+
+                            con.commit()
+                            con.close()
+
+                            st.success("تم تحديث المشروع.")
+                            st.rerun()
+
+                    with c2:
+
+                        st.download_button(
+                            "تنزيل المشروع",
+                            edited.encode("utf-8"),
+                            file_name=f"project_{project['id']}.txt",
+                            key=f"download_{project['id']}"
+                        )
+
+                    if st.button(
+                        "حذف المشروع",
+                        key=f"delete_{project['id']}"
+                    ):
+
+                        con = connect_db()
+
+                        con.execute("""
+                            DELETE FROM projects
+                            WHERE id=? AND username=?
+                        """, (
+                            project["id"],
+                            current_user()["username"]
+                        ))
+
+                        con.commit()
+                        con.close()
+
+                        st.success("تم حذف المشروع.")
+                        st.rerun()
+
+
+# =========================================================
+# IMAGE RESIZING AND VIDEO
+# =========================================================
+
+elif page == "🎬 الصور والفيديو":
+
+    st.subheader("الصور والفيديو")
+
+    sizes = {
+        "منشور مربع": (1080, 1080),
+        "قصة أو ريلز": (1080, 1920),
+        "منشور أفقي": (1200, 630),
+        "فيديو أفقي": (1920, 1080),
+        "فيديو عمودي": (1080, 1920)
+    }
+
+    size_name = st.selectbox("المقاس", list(sizes.keys()))
+
+    width, height = sizes[size_name]
+
+    st.write(f"الأبعاد المطلوبة: **{width} × {height}**")
+
+    uploaded = st.file_uploader(
+        "ارفع صورة لتغيير مقاسها",
+        type=["png", "jpg", "jpeg", "webp"]
     )
 
-    with st.form("logo_form"):
-        brand_name = st.text_input("اسم العلامة التجارية")
+    if uploaded:
 
-        logo_type = st.selectbox(
-            "نوع الشعار",
-            [
-                "تقني",
-                "مطعم",
-                "متجر",
-                "عقارات",
-                "ملابس",
-                "تعليمي",
-                "شعار شخصي",
-                "نوع آخر"
-            ]
-        )
+        try:
 
-        logo_colors = st.text_input(
-            "الألوان المفضلة",
-            placeholder="مثل: الأسود والذهبي"
-        )
+            img = Image.open(uploaded).convert("RGB")
 
-        logo_style = st.selectbox(
-            "أسلوب الشعار",
-            [
-                "عصري",
-                "فاخر",
-                "بسيط",
-                "هندسي",
-                "مرح",
-                "رسمي"
-            ]
-        )
-
-        logo_details = st.text_area(
-            "تفاصيل إضافية",
-            placeholder="صف الفكرة والرموز والعناصر التي تريدها."
-        )
-
-        save_logo = st.form_submit_button("حفظ فكرة الشعار")
-
-    if save_logo:
-        if not brand_name.strip():
-            st.warning("اكتب اسم العلامة التجارية أولًا.")
-        else:
-            description = (
-                f"شعار باسم {brand_name}. "
-                f"المجال: {logo_type}. "
-                f"الألوان: {logo_colors}. "
-                f"الأسلوب: {logo_style}. "
-                f"تفاصيل: {logo_details}"
+            mode = st.radio(
+                "طريقة ضبط الصورة",
+                [
+                    "احتواء الصورة كاملة",
+                    "ملء الإطار وقص الزوائد"
+                ]
             )
 
-            with get_db() as conn:
-                conn.execute("""
-                    INSERT INTO projects
-                    (username, title, category, description, created_at)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (
-                    user["username"],
-                    "شعار " + brand_name,
-                    "شعار",
-                    description,
-                    datetime.now().isoformat(timespec="seconds")
-                ))
+            if mode == "احتواء الصورة كاملة":
 
-            st.success("تم حفظ فكرة الشعار في مشاريعك.")
+                resized = ImageOps.contain(img, (width, height))
+
+                output = Image.new(
+                    "RGB",
+                    (width, height),
+                    (15, 23, 40)
+                )
+
+                output.paste(
+                    resized,
+                    (
+                        (width - resized.width) // 2,
+                        (height - resized.height) // 2
+                    )
+                )
+
+            else:
+
+                output = ImageOps.fit(
+                    img,
+                    (width, height),
+                    method=Image.Resampling.LANCZOS
+                )
+
+            st.image(
+                output,
+                caption=f"{width} × {height}",
+                use_container_width=True
+            )
+
+            buffer = io.BytesIO()
+            output.save(buffer, format="PNG")
+
+            st.download_button(
+                "تنزيل الصورة بالمقاس الجديد",
+                buffer.getvalue(),
+                file_name=f"number_one_{width}x{height}.png",
+                mime="image/png",
+                type="primary"
+            )
+
+        except Exception as exc:
+            st.error(f"تعذرت معالجة الصورة: {exc}")
+
+    st.markdown("---")
+    st.subheader("تحرير الفيديو")
 
     st.info(
-        "ملاحظة: هذه الصفحة تجمع مواصفات الشعار وتحفظها فقط. "
-        "إنشاء صورة شعار فعلية يحتاج إلى ربط نموذج ذكاء اصطناعي."
+        "قريبًا — تغيير أبعاد الفيديو وقصه وتصديره يحتاج "
+        "إلى وحدة معالجة فيديو مثل FFmpeg على الخادم."
     )
 
-
-# ==================================================
-# تصميم الإعلانات
-# ==================================================
-
-elif page == "تصميم الإعلانات":
-
-    st.title("📢 مساحة تصميم الإعلانات")
-
-    with st.form("ad_form"):
-        ad_title = st.text_input("عنوان الإعلان")
-
-        business_type = st.selectbox(
-            "نوع النشاط",
-            [
-                "مطعم",
-                "عقارات",
-                "متجر",
-                "ملابس",
-                "خدمات",
-                "تعليم",
-                "نشاط آخر"
-            ]
-        )
-
-        ad_platform = st.selectbox(
-            "مكان نشر الإعلان",
-            [
-                "فيسبوك",
-                "إنستغرام",
-                "واتساب",
-                "تيك توك",
-                "إعلان مطبوع"
-            ]
-        )
-
-        ad_goal = st.selectbox(
-            "هدف الإعلان",
-            [
-                "زيادة المبيعات",
-                "جذب عملاء جدد",
-                "الإعلان عن عرض",
-                "التعريف بالعلامة التجارية",
-                "إطلاق منتج"
-            ]
-        )
-
-        ad_details = st.text_area(
-            "تفاصيل الإعلان",
-            placeholder="اكتب المنتج والسعر والعرض ومعلومات التواصل."
-        )
-
-        save_ad = st.form_submit_button("حفظ فكرة الإعلان")
-
-    if save_ad:
-        if not ad_title.strip():
-            st.warning("أدخل عنوان الإعلان.")
-        else:
-            description = (
-                f"عنوان الإعلان: {ad_title}. "
-                f"النشاط: {business_type}. "
-                f"المنصة: {ad_platform}. "
-                f"الهدف: {ad_goal}. "
-                f"التفاصيل: {ad_details}"
-            )
-
-            with get_db() as conn:
-                conn.execute("""
-                    INSERT INTO projects
-                    (username, title, category, description, created_at)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (
-                    user["username"],
-                    ad_title,
-                    "إعلان",
-                    description,
-                    datetime.now().isoformat(timespec="seconds")
-                ))
-
-            st.success("تم حفظ فكرة الإعلان.")
+    st.subheader("توليد الصور والشعارات بالذكاء الاصطناعي")
 
     st.info(
-        "إنشاء التصميم النهائي والصور والفيديو يحتاج إلى خدمة ذكاء اصطناعي "
-        "سنربطها في مرحلة لاحقة."
+        "قريبًا — يلزم ربط مزود توليد صور بمفتاح API آمن."
     )
 
 
-# ==================================================
-# مساحة التجار
-# ==================================================
+# =========================================================
+# SOCIAL MEDIA
+# =========================================================
 
-elif page == "مساحة التجار":
+elif page == "🌐 حسابات التواصل":
 
-    st.title("🛍️ مساحة التجار")
+    st.subheader("حسابات التواصل الاجتماعي")
 
     st.write(
-        "مكان مخصص للتاجر لتنظيم أفكار منتجاته وإعلاناته."
+        "يمكن تجهيز قائمة الحسابات التي تريد ربطها بالمنصة."
     )
 
-    with st.form("merchant_form"):
-        product_name = st.text_input("اسم المنتج أو الخدمة")
+    platforms = [
+        "Facebook",
+        "Instagram",
+        "TikTok",
+        "YouTube",
+        "X",
+        "LinkedIn"
+    ]
 
-        product_price = st.text_input(
-            "السعر (اختياري)",
-            placeholder="مثال: 5000 ريال"
-        )
+    if require_login():
 
-        product_description = st.text_area(
-            "وصف المنتج"
-        )
+        for platform in platforms:
 
-        merchant_goal = st.selectbox(
-            "ماذا تريد؟",
-            [
-                "إعلان للمنتج",
-                "وصف تسويقي",
-                "فكرة حملة تسويقية",
-                "عرض ترويجي"
-            ]
-        )
+            with st.container(border=True):
 
-        save_product = st.form_submit_button("حفظ بيانات المنتج")
+                st.markdown(f"### {platform}")
 
-    if save_product:
-        if not product_name.strip():
-            st.warning("اكتب اسم المنتج.")
-        else:
-            description = (
-                f"المنتج: {product_name}. "
-                f"السعر: {product_price}. "
-                f"الوصف: {product_description}. "
-                f"الهدف: {merchant_goal}."
-            )
-
-            with get_db() as conn:
-                conn.execute("""
-                    INSERT INTO projects
-                    (username, title, category, description, created_at)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (
-                    user["username"],
-                    product_name,
-                    "تاجر",
-                    description,
-                    datetime.now().isoformat(timespec="seconds")
-                ))
-
-            st.success("تم حفظ بيانات المنتج.")
-
-
-# ==================================================
-# مشاريعي
-# ==================================================
-
-elif page == "مشاريعي":
-
-    st.title("📁 مشاريعي")
-
-    with get_db() as conn:
-        projects = conn.execute("""
-            SELECT id, title, category, description, created_at
-            FROM projects
-            WHERE username = ?
-            ORDER BY id DESC
-        """, (user["username"],)).fetchall()
-
-    if not projects:
-        st.info("لا توجد مشاريع محفوظة حتى الآن.")
-    else:
-        st.write(f"عدد المشاريع: {len(projects)}")
-
-        for project in projects:
-            project_id, title, category, description, created_at = project
-
-            with st.expander(f"{title} — {category}"):
-                st.write(description or "")
-                st.caption(created_at)
+                url = st.text_input(
+                    "رابط الحساب",
+                    key=f"social_url_{platform}"
+                )
 
                 if st.button(
-                    "حذف المشروع",
-                    key=f"delete_project_{project_id}"
+                    "حفظ الرابط",
+                    key=f"social_save_{platform}"
                 ):
-                    with get_db() as conn:
-                        conn.execute("""
-                            DELETE FROM projects
-                            WHERE id = ? AND username = ?
-                        """, (project_id, user["username"]))
 
-                    st.success("تم حذف المشروع.")
-                    st.rerun()
+                    if url and not url.startswith(("https://", "http://")):
+                        st.error("أدخل رابطًا يبدأ بـ https:// أو http://")
+                    else:
+
+                        con = connect_db()
+
+                        con.execute("""
+                            INSERT INTO social_accounts
+                            (username,platform,profile_url,status,created)
+                            VALUES (?,?,?,'رابط محفوظ',?)
+                        """, (
+                            current_user()["username"],
+                            platform,
+                            url,
+                            now()
+                        ))
+
+                        con.commit()
+                        con.close()
+
+                        st.success("تم حفظ الرابط.")
+
+                st.caption(
+                    "النشر المباشر وإدارة الرسائل والإحصاءات: قريبًا."
+                )
 
 
-# ==================================================
-# الاشتراكات
-# ==================================================
+# =========================================================
+# MERCHANT WORKSPACE
+# =========================================================
 
-elif page == "الاشتراكات":
+elif page == "🏪 مساحة التجار":
 
-    st.title("⭐ خطط NUMBER ONE")
+    st.subheader("مساحة التجار")
 
-    free_col, pro_col = st.columns(2)
+    if not require_login():
+        st.stop()
 
-    with free_col:
-        with st.container(border=True):
-            st.subheader("🆓 الخطة المجانية")
-            st.markdown("### 0 ريال")
-            st.write("• إنشاء حساب")
-            st.write("• تصفح أفكار القوالب")
-            st.write("• حفظ أفكار المشاريع")
-            st.write("• مساحة التاجر الأساسية")
+    profile = get_profile(current_user()["username"])
 
-            if user["plan"] == "free":
-                st.success("خطتك الحالية")
+    if profile["role"] not in ("merchant", "owner"):
 
-    with pro_col:
-        with st.container(border=True):
-            st.subheader("💎 خطة Pro")
-            st.markdown("### قريبًا")
-            st.write("• مزايا إضافية عند تفعيلها")
-            st.write("• خدمات تصميم بالذكاء الاصطناعي عند ربطها")
-            st.write("• أدوات إضافية حسب الخطة")
+        st.warning(
+            "حسابك ليس حساب تاجر بعد. يمكنك التواصل مع المالك "
+            "لطلب تفعيل صلاحية التاجر."
+        )
 
-            st.warning("الدفع والاشتراكات الفعلية غير مفعلة بعد.")
+    con = connect_db()
 
-    st.caption(
-        "لا توجد عملية دفع أو ترقية مدفوعة فعالة في هذه النسخة."
+    spaces = con.execute("""
+        SELECT * FROM ad_spaces
+        WHERE active=1
+    """).fetchall()
+
+    con.close()
+
+    if not spaces:
+        st.info("لا توجد مساحات إعلانية متاحة.")
+    else:
+
+        with st.form("merchant_ad_form"):
+
+            title = st.text_input("عنوان الإعلان")
+            description = st.text_area("وصف الإعلان")
+
+            placement = st.selectbox(
+                "المساحة",
+                [s["title"] for s in spaces]
+            )
+
+            duration = st.selectbox(
+                "مدة الإعلان",
+                [7, 14, 30]
+            )
+
+            submitted = st.form_submit_button(
+                "إرسال للمراجعة",
+                type="primary"
+            )
+
+        if submitted:
+
+            if not title.strip() or not description.strip():
+
+                st.error("أدخل عنوان الإعلان والوصف.")
+
+            else:
+
+                con = connect_db()
+
+                con.execute("""
+                    INSERT INTO merchant_ads
+                    (username,title,description,placement,duration,created)
+                    VALUES (?,?,?,?,?,?)
+                """, (
+                    current_user()["username"],
+                    title,
+                    description,
+                    placement,
+                    duration,
+                    now()
+                ))
+
+                con.commit()
+                con.close()
+
+                log_action(
+                    current_user()["username"],
+                    "merchant_ad_submitted",
+                    title
+                )
+
+                st.success(
+                    "تم إرسال الطلب للمراجعة. النشر غير تلقائي."
+                )
+
+    con = connect_db()
+
+    mine = con.execute("""
+        SELECT * FROM merchant_ads
+        WHERE username=?
+        ORDER BY id DESC
+    """, (current_user()["username"],)).fetchall()
+
+    con.close()
+
+    st.markdown("### طلباتي الإعلانية")
+
+    for ad in mine:
+
+        st.markdown(
+            f"**{ad['title']}** — {ad['status']} — "
+            f"{ad['price']}"
+        )
+
+
+# =========================================================
+# SUBSCRIPTIONS
+# =========================================================
+
+elif page == "💎 الاشتراكات":
+
+    st.subheader("الاشتراكات")
+
+    free, pro, merchant = st.columns(3)
+
+    with free:
+
+        st.markdown("""
+        <div class="panel">
+        <h3 class="gold">Free</h3>
+        <h2>مجاني</h2>
+        <p>تصفح القوالب</p>
+        <p>إنشاء نصوص إعلانية</p>
+        <p>حفظ المشاريع بعد التسجيل</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with pro:
+
+        st.markdown("""
+        <div class="panel">
+        <h3 class="gold">Pro</h3>
+        <h2>مدفوع</h2>
+        <p>مزايا إضافية عند تفعيلها</p>
+        <p>خدمات موسعة</p>
+        <p>ميزات مستقبلية</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with merchant:
+
+        st.markdown("""
+        <div class="panel">
+        <h3 class="gold">Merchant</h3>
+        <h2>للتجار</h2>
+        <p>طلبات إعلانية</p>
+        <p>متابعة حالة الطلبات</p>
+        <p>مساحات إعلانية</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.warning(
+        "لا يتم خصم أموال تلقائيًا. لا تُفعّل الاشتراكات "
+        "المدفوعة إلا بعد مراجعة الدفع."
+    )
+
+    if st.button("طلب اشتراك Pro", type="primary"):
+
+        if require_login():
+
+            st.session_state["requested_plan"] = "Pro"
+            st.success("انتقل إلى صفحة الدفع لتقديم طلب الاشتراك.")
+
+
+# =========================================================
+# PAYMENTS
+# =========================================================
+
+elif page == "💳 الدفع":
+
+    st.subheader("طلبات الدفع")
+
+    if not require_login():
+        st.stop()
+
+    with st.form("payment_form"):
+
+        plan = st.selectbox(
+            "الخطة",
+            ["Pro", "مساحة إعلانية"]
+        )
+
+        method = st.selectbox(
+            "وسيلة الدفع",
+            [
+                "تحويل يدوي / محفظة",
+                "وسيلة أخرى معتمدة"
+            ]
+        )
+
+        amount = st.text_input("المبلغ والعملة")
+        reference = st.text_input("رقم العملية أو المرجع")
+
+        submitted = st.form_submit_button(
+            "إرسال طلب الدفع",
+            type="primary"
+        )
+
+    if submitted:
+
+        if not amount.strip() or not reference.strip():
+
+            st.error("أدخل المبلغ ومرجع العملية.")
+
+        else:
+
+            con = connect_db()
+
+            con.execute("""
+                INSERT INTO payments
+                (username,method,amount,reference,status,created)
+                VALUES (?,?,?,?,?,?)
+            """, (
+                current_user()["username"],
+                method,
+                amount,
+                reference,
+                "قيد المراجعة",
+                now()
+            ))
+
+            con.commit()
+            con.close()
+
+            log_action(
+                current_user()["username"],
+                "payment_submitted",
+                plan
+            )
+
+            st.success(
+                "تم تسجيل الطلب للمراجعة. لم يتم تفعيل الاشتراك بعد."
+            )
+
+    con = connect_db()
+
+    payments = con.execute("""
+        SELECT * FROM payments
+        WHERE username=?
+        ORDER BY id DESC
+    """, (current_user()["username"],)).fetchall()
+
+    con.close()
+
+    for payment in payments:
+
+        st.markdown(
+            f"**{payment['method']}** — "
+            f"{payment['amount']} — "
+            f"{payment['status']}"
+        )
+
+    st.info(
+        "الربط الآلي مع YemenPay أو Esaalat: قريبًا، "
+        "حتى إعداد مزود الدفع والتحقق من العمليات."
     )
 
 
-# ==================================================
-# إعدادات الحساب
-# ==================================================
+# =========================================================
+# DESIGN ORDERS
+# =========================================================
 
-elif page == "إعدادات الحساب":
+elif page == "📋 طلب تصميم":
 
-    st.title("⚙️ إعدادات الحساب")
+    st.subheader("طلب تصميم")
 
-    account = get_user(user["username"])
+    with st.form("design_order_form"):
 
-    if account:
-        st.write("**اسم المستخدم:**", account["username"])
-        st.write(
-            "**نوع الحساب:**",
-            "مدير" if account["role"] == "admin" else "مستخدم"
-        )
-        st.write(
-            "**الخطة:**",
-            "مجانية" if account["plan"] == "free" else "Pro"
-        )
-        st.write("**تاريخ إنشاء الحساب:**", account["created_at"])
-
-    st.divider()
-
-    st.subheader("🔐 تغيير كلمة المرور")
-
-    with st.form("change_password_form"):
-        old_password = st.text_input(
-            "كلمة المرور الحالية",
-            type="password"
+        category = st.selectbox(
+            "نوع التصميم",
+            [
+                "شعار",
+                "إعلان",
+                "هوية بصرية",
+                "فيديو",
+                "إدارة محتوى",
+                "أخرى"
+            ]
         )
 
-        new_password = st.text_input(
-            "كلمة المرور الجديدة",
-            type="password"
+        details = st.text_area("تفاصيل الطلب")
+        contact = st.text_input("وسيلة التواصل")
+
+        submitted = st.form_submit_button(
+            "إرسال الطلب",
+            type="primary"
         )
 
-        confirm_new_password = st.text_input(
-            "تأكيد كلمة المرور الجديدة",
-            type="password"
-        )
+    if submitted:
 
-        change_submit = st.form_submit_button("تغيير كلمة المرور")
+        if not require_login():
+            pass
 
-    if change_submit:
-        if new_password != confirm_new_password:
-            st.error("كلمتا المرور الجديدتان غير متطابقتين.")
+        elif not details.strip() or not contact.strip():
+
+            st.error("أدخل تفاصيل الطلب ووسيلة التواصل.")
 
         else:
-            success, message = change_password(
-                user["username"],
-                old_password,
-                new_password
+
+            con = connect_db()
+
+            con.execute("""
+                INSERT INTO orders
+                (username,category,details,contact,created)
+                VALUES (?,?,?,?,?)
+            """, (
+                current_user()["username"],
+                category,
+                details,
+                contact,
+                now()
+            ))
+
+            con.commit()
+            con.close()
+
+            log_action(
+                current_user()["username"],
+                "design_order_submitted",
+                category
             )
 
-            if success:
+            st.success("تم تسجيل طلبك.")
+
+
+# =========================================================
+# ACCOUNT
+# =========================================================
+
+elif page == "👤 حسابي":
+
+    st.subheader("حسابي")
+
+    if require_login():
+
+        con = connect_db()
+
+        user = con.execute("""
+            SELECT username,plan,created
+            FROM users WHERE username=?
+        """, (current_user()["username"],)).fetchone()
+
+        con.close()
+
+        profile = get_profile(current_user()["username"])
+
+        st.write(f"**اسم المستخدم:** {user['username']}")
+        st.write(f"**نوع الحساب:** {profile['role']}")
+        st.write(f"**الخطة:** {user['plan']}")
+        st.write(f"**تاريخ الإنشاء:** {user['created']}")
+
+        st.info(
+            "استعادة كلمة المرور عبر البريد: قريبًا، "
+            "حتى إعداد خدمة بريد آمنة."
+        )
+
+
+# =========================================================
+# LOGIN
+# =========================================================
+
+elif page == "🔐 تسجيل الدخول":
+
+    st.subheader("تسجيل الدخول")
+
+    with st.form("login_form"):
+
+        username = st.text_input("اسم المستخدم")
+        password = st.text_input("كلمة المرور", type="password")
+
+        submitted = st.form_submit_button(
+            "تسجيل الدخول",
+            type="primary"
+        )
+
+    if submitted:
+
+        # دخول المالك منفصل عن حسابات المستخدمين.
+        if owner_login(username, password):
+
+            st.session_state["user"] = {
+                "username": OWNER_USERNAME,
+                "plan": "Pro",
+                "role": "owner"
+            }
+
+            log_action(OWNER_USERNAME, "owner_login")
+            st.success("تم تسجيل دخول المالك.")
+            st.rerun()
+
+        else:
+
+            user = authenticate(username, password)
+
+            if user:
+
+                st.session_state["user"] = user
+                st.success("تم تسجيل الدخول.")
+                st.rerun()
+
+            else:
+
+                st.error(
+                    "بيانات الدخول غير صحيحة أو الحساب غير نشط."
+                )
+
+
+# =========================================================
+# REGISTRATION
+# =========================================================
+
+elif page == "📝 إنشاء حساب":
+
+    st.subheader("إنشاء حساب")
+
+    with st.form("register_form"):
+
+        username = st.text_input("اسم المستخدم")
+        email = st.text_input("البريد الإلكتروني")
+        password = st.text_input("كلمة المرور", type="password")
+        confirm = st.text_input("تأكيد كلمة المرور", type="password")
+
+        consent = st.checkbox(
+            "أوافق على الشروط وسياسة الخصوصية"
+        )
+
+        submitted = st.form_submit_button(
+            "إنشاء الحساب",
+            type="primary"
+        )
+
+    if submitted:
+
+        if not consent:
+
+            st.error("يجب الموافقة على الشروط.")
+
+        elif password != confirm:
+
+            st.error("كلمتا المرور غير متطابقتين.")
+
+        else:
+
+            ok, message = register_user(
+                username,
+                password,
+                email
+            )
+
+            if ok:
                 st.success(message)
             else:
                 st.error(message)
 
-    st.info(
-        "استخدم كلمة مرور قوية لا تستخدمها في مواقع أخرى، "
-        "ولا تشاركها مع أحد."
-    )
 
+# =========================================================
+# ACCOUNT RECOVERY
+# =========================================================
 
-# ==================================================
-# لوحة الإدارة
-# ==================================================
+elif page == "🔑 استعادة الحساب":
 
-elif page == "لوحة الإدارة":
-
-    if user["role"] != "admin":
-        st.error("ليس لديك صلاحية الدخول إلى هذه الصفحة.")
-        st.stop()
-
-    st.title("🛡️ لوحة إدارة NUMBER ONE")
-
-    with get_db() as conn:
-        total_users = conn.execute(
-            "SELECT COUNT(*) FROM users"
-        ).fetchone()[0]
-
-        total_projects = conn.execute(
-            "SELECT COUNT(*) FROM projects"
-        ).fetchone()[0]
-
-        all_users = conn.execute("""
-            SELECT username, role, plan, created_at
-            FROM users
-            ORDER BY id DESC
-        """).fetchall()
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.metric("عدد الحسابات", total_users)
-
-    with c2:
-        st.metric("عدد المشاريع", total_projects)
-
-    st.subheader("الحسابات المسجلة")
-
-    for account in all_users:
-        st.write(
-            f"👤 {account[0]} | "
-            f"الصلاحية: {account[1]} | "
-            f"الخطة: {account[2]} | "
-            f"التاريخ: {account[3]}"
-        )
+    st.subheader("استعادة الحساب")
 
     st.warning(
-        "هذه لوحة إدارة أولية. لا توجد فيها بعد أدوات دفع أو إدارة "
-        "متقدمة للاشتراكات."
+        "قريبًا — يجب إعداد خدمة بريد إلكتروني آمنة "
+        "لإرسال روابط إعادة تعيين كلمة المرور."
+    )
+
+    st.write(
+        "لا تدخل كلمة مرور حسابك أو رمز تحقق في هذه الصفحة."
     )
 
 
-# ==================================================
-# نهاية الصفحة
-# ==================================================
+# =========================================================
+# SETTINGS
+# =========================================================
 
-st.divider()
+elif page == "⚙️ الإعدادات":
+
+    st.subheader("الإعدادات")
+
+    if require_login():
+
+        st.write("إعدادات الحساب والبيانات.")
+
+        con = connect_db()
+
+        projects = con.execute("""
+            SELECT title,category,content,created,updated
+            FROM projects WHERE username=?
+        """, (current_user()["username"],)).fetchall()
+
+        orders = con.execute("""
+            SELECT category,details,contact,created
+            FROM orders WHERE username=?
+        """, (current_user()["username"],)).fetchall()
+
+        con.close()
+
+        data = {
+            "username": current_user()["username"],
+            "projects": [dict(x) for x in projects],
+            "orders": [dict(x) for x in orders]
+        }
+
+        st.download_button(
+            "تنزيل نسخة من بياناتي",
+            json.dumps(
+                data,
+                ensure_ascii=False,
+                indent=2
+            ).encode("utf-8"),
+            file_name="number_one_data.json",
+            mime="application/json"
+        )
+
+
+# =========================================================
+# PRIVACY AND TERMS
+# =========================================================
+
+elif page == "📜 الخصوصية والشروط":
+
+    st.subheader("الخصوصية والشروط")
+
+    st.markdown("""
+    ### الخصوصية
+    - تُستخدم بيانات الحساب لتشغيل خدمات المنصة.
+    - لا تشارك كلمات مرور حسابات التواصل الاجتماعي.
+    - لا تدخل بيانات بطاقتك البنكية في النماذج.
+    - يمكنك تنزيل بيانات مشاريعك من الإعدادات.
+    - يجب حماية قاعدة البيانات ونسخها احتياطيًا.
+
+    ### الشروط
+    - تأكد من امتلاك حقوق المحتوى الذي تستخدمه.
+    - راجع الأسعار والعروض قبل نشر أي إعلان.
+    - طلب الدفع لا يعني قبول العملية.
+    - الميزات التي تظهر «قريبًا» غير مفعلة.
+    - قد تُعلّق الحسابات المخالفة للشروط.
+
+    هذه صيغة أولية، ويجب مراجعتها قانونيًا قبل الإطلاق العام.
+    """)
+
+
+# =========================================================
+# CONTACT
+# =========================================================
+
+elif page == "📞 التواصل":
+
+    st.subheader("التواصل مع NUMBER ONE")
+
+    st.write(
+        "يمكنك إرسال طلبك من صفحة «طلب تصميم» "
+        "ومتابعة الطلب من حسابك."
+    )
+
+    st.info(
+        "البريد الرسمي والدعم المباشر: قريبًا، "
+        "حتى إعداد قناة تواصل حقيقية."
+    )
+
+
+# =========================================================
+# OWNER DASHBOARD
+# =========================================================
+
+elif page == "🛡️ لوحة المالك":
+
+    st.subheader("لوحة إدارة المالك")
+
+    if not is_owner():
+
+        st.error(
+            "هذه الصفحة مخصصة للمالك. سجّل الدخول "
+            "باستخدام بيانات المالك المضبوطة في Secrets."
+        )
+
+        st.stop()
+
+    con = connect_db()
+
+    users = con.execute("""
+        SELECT username,plan,created FROM users
+        ORDER BY id DESC
+    """).fetchall()
+
+    payments = con.execute("""
+        SELECT * FROM payments ORDER BY id DESC
+    """).fetchall()
+
+    orders = con.execute("""
+        SELECT * FROM orders ORDER BY id DESC
+    """).fetchall()
+
+    ads = con.execute("""
+        SELECT * FROM merchant_ads ORDER BY id DESC
+    """).fetchall()
+
+    audit = con.execute("""
+        SELECT * FROM audit_log ORDER BY id DESC LIMIT 100
+    """).fetchall()
+
+    con.close()
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric("المستخدمون", len(users))
+    c2.metric("طلبات الدفع", len(payments))
+    c3.metric("طلبات التصميم", len(orders))
+    c4.metric("إعلانات التجار", len(ads))
+
+    st.markdown("### المستخدمون")
+
+    if users:
+
+        st.dataframe(
+            [
+                {
+                    "المستخدم": u["username"],
+                    "الخطة": u["plan"],
+                    "تاريخ التسجيل": u["created"]
+                }
+                for u in users
+            ],
+            use_container_width=True,
+            hide_index=True
+        )
+
+    st.markdown("### إدارة الصلاحيات")
+
+    with st.form("manage_user_form"):
+
+        target = st.text_input("اسم المستخدم")
+        role = st.selectbox(
+            "الصلاحية",
+            ["user", "merchant"]
+        )
+        status = st.selectbox(
+            "حالة الحساب",
+            ["active", "suspended"]
+        )
+        plan = st.selectbox(
+            "الخطة",
+            ["Free", "Pro"]
+        )
+
+        submitted = st.form_submit_button(
+            "حفظ التغييرات"
+        )
+
+    if submitted:
+
+        if not target.strip():
+
+            st.error("أدخل اسم المستخدم.")
+
+        elif target.strip() == OWNER_USERNAME:
+
+            st.error("لا يمكن تغيير صلاحيات المالك من هنا.")
+
+        else:
+
+            con = connect_db()
+
+            exists = con.execute("""
+                SELECT username FROM users WHERE username=?
+            """, (target.strip(),)).fetchone()
+
+            if exists:
+
+                con.execute("""
+                    INSERT OR IGNORE INTO user_profiles
+                    (username,email,role,status)
+                    VALUES (?,'','user','active')
+                """, (target.strip(),))
+
+                con.execute("""
+                    UPDATE user_profiles
+                    SET role=?, status=?
+                    WHERE username=?
+                """, (role, status, target.strip()))
+
+                con.execute("""
+                    UPDATE users SET plan=?
+                    WHERE username=?
+                """, (plan, target.strip()))
+
+                con.commit()
+                con.close()
+
+                log_action(
+                    OWNER_USERNAME,
+                    "user_permissions_updated",
+                    target
+                )
+
+                st.success("تم تحديث الحساب.")
+                st.rerun()
+
+            else:
+
+                con.close()
+                st.error("لم يتم العثور على المستخدم.")
+
+    st.markdown("### مراجعة المدفوعات")
+
+    for payment in payments:
+
+        with st.container(border=True):
+
+            st.write(
+                f"المستخدم: {payment['username']} | "
+                f"المبلغ: {payment['amount']} | "
+                f"المرجع: {payment['reference']} | "
+                f"الحالة: {payment['status']}"
+            )
+
+            decision = st.selectbox(
+                "قرار الدفع",
+                ["قيد المراجعة", "مقبول", "مرفوض"],
+                key=f"payment_decision_{payment['id']}"
+            )
+
+            if st.button(
+                "حفظ قرار الدفع",
+                key=f"save_payment_{payment['id']}"
+            ):
+
+                con = connect_db()
+
+                con.execute("""
+                    UPDATE payments SET status=?
+                    WHERE id=?
+                """, (decision, payment["id"]))
+
+                if decision == "مقبول":
+                    con.execute("""
+                        UPDATE users SET plan='Pro'
+                        WHERE username=?
+                    """, (payment["username"],))
+
+                con.commit()
+                con.close()
+
+                log_action(
+                    OWNER_USERNAME,
+                    "payment_reviewed",
+                    str(payment["id"])
+                )
+
+                st.success("تم حفظ القرار.")
+                st.rerun()
+
+    st.markdown("### طلبات التصميم")
+
+    for order in orders:
+
+        with st.expander(
+            f"#{order['id']} — {order['username']} — "
+            f"{order['category']}"
+        ):
+
+            st.write(order["details"])
+            st.write(f"التواصل: {order['contact']}")
+
+    st.markdown("### طلبات إعلانات التجار")
+
+    for ad in ads:
+
+        with st.expander(
+            f"#{ad['id']} — {ad['title']} — {ad['status']}"
+        ):
+
+            st.write(ad["description"])
+            st.write(f"المساحة: {ad['placement']}")
+
+            decision = st.selectbox(
+                "حالة الإعلان",
+                [
+                    "بانتظار المراجعة",
+                    "مقبول",
+                    "مرفوض",
+                    "متوقف"
+                ],
+                key=f"merchant_status_{ad['id']}"
+            )
+
+            price = st.text_input(
+                "السعر",
+                value=ad["price"],
+                key=f"merchant_price_{ad['id']}"
+            )
+
+            if st.button(
+                "حفظ حالة الإعلان",
+                key=f"merchant_save_{ad['id']}"
+            ):
+
+                con = connect_db()
+
+                con.execute("""
+                    UPDATE merchant_ads
+                    SET status=?, price=?
+                    WHERE id=?
+                """, (decision, price, ad["id"]))
+
+                con.commit()
+                con.close()
+
+                log_action(
+                    OWNER_USERNAME,
+                    "merchant_ad_reviewed",
+                    str(ad["id"])
+                )
+
+                st.success("تم تحديث الإعلان.")
+                st.rerun()
+
+    st.markdown("### سجل العمليات")
+
+    if audit:
+
+        st.dataframe(
+            [
+                {
+                    "الفاعل": x["actor"],
+                    "العملية": x["action"],
+                    "التفاصيل": x["details"],
+                    "التاريخ": x["created"]
+                }
+                for x in audit
+            ],
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+# =========================================================
+# FOOTER
+# =========================================================
+
+st.markdown("---")
 
 st.caption(
-    "NUMBER ONE | منصة القوالب والتصميم والإعلانات"
-    )
+    "NUMBER ONE © 2026 | استوديو الإعلانات والتصميم"
+)
+
+st.caption(
+    "الميزات غير المرتبطة بخدمات خارجية تظهر بوضوح على أنها قريبًا."
+)
